@@ -1,414 +1,447 @@
+#!/usr/bin/env python3
+"""Build NBA + college career catalogs from public season dumps."""
+
 from __future__ import annotations
 
+import csv
 import json
-import math
+import os
 import re
-from collections import defaultdict
+import time
+import unicodedata
+import urllib.request
+from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT / "data"
-LIB_DATA = ROOT / "lib" / "data"
+RAW = Path("/tmp/bball-raw")
+OUT = ROOT / "data"
+OUT.mkdir(exist_ok=True)
 
-# Canonical college aliases (same as the original sim).
-COLLEGE_ALIASES: dict[str, str] = {
-    "unc": "North Carolina",
-    "north carolina": "North Carolina",
-    "duke": "Duke",
-    "kansas": "Kansas",
-    "uk": "Kentucky",
-    "kentucky": "Kentucky",
-    "ucla": "UCLA",
-    "iu": "Indiana",
-    "indiana": "Indiana",
-    "msu": "Michigan State",
-    "michigan state": "Michigan State",
-    "michigan": "Michigan",
-    "syracuse": "Syracuse",
-    "uconn": "UConn",
-    "connecticut": "UConn",
-    "villanova": "Villanova",
-    "nova": "Villanova",
-    "louisville": "Louisville",
-    "georgetown": "Georgetown",
-    "arizona": "Arizona",
-    "florida": "Florida",
-    "ohio state": "Ohio State",
-    "osu": "Ohio State",
-    "purdue": "Purdue",
-    "houston": "Houston",
-    "memphis": "Memphis",
-    "unlv": "UNLV",
-    "gonzaga": "Gonzaga",
-    "marquette": "Marquette",
-    "st. john's": "St. John's",
-    "st johns": "St. John's",
-    "arkansas": "Arkansas",
-    "oklahoma": "Oklahoma",
-    "texas": "Texas",
-    "kansas state": "Kansas State",
-    "wake forest": "Wake Forest",
-    "nc state": "NC State",
-    "north carolina state": "NC State",
-    "georgia tech": "Georgia Tech",
-    "virginia": "Virginia",
-    "maryland": "Maryland",
-    "seton hall": "Seton Hall",
-    "depaul": "DePaul",
-    "cincinnati": "Cincinnati",
-    "memphis state": "Memphis",
-    "san francisco": "San Francisco",
-    "seattle": "Seattle",
-    "holy cross": "Holy Cross",
-    "la salle": "La Salle",
-    "bradley": "Bradley",
-    "wyoming": "Wyoming",
-    "utah": "Utah",
-    "byu": "BYU",
-    "brigham young": "BYU",
-    "lsu": "LSU",
-    "louisiana state": "LSU",
-    "alabama": "Alabama",
-    "auburn": "Auburn",
-    "tennessee": "Tennessee",
-    "south carolina": "South Carolina",
-    "ole miss": "Ole Miss",
-    "mississippi": "Ole Miss",
-    "mississippi state": "Mississippi State",
-    "vanderbilt": "Vanderbilt",
-    "missouri": "Missouri",
-    "iowa": "Iowa",
-    "iowa state": "Iowa State",
-    "illinois": "Illinois",
-    "wisconsin": "Wisconsin",
-    "minnesota": "Minnesota",
-    "northwestern": "Northwestern",
-    "penn state": "Penn State",
-    "nebraska": "Nebraska",
-    "oregon": "Oregon",
-    "oregon state": "Oregon State",
-    "washington": "Washington",
-    "washington state": "Washington State",
-    "stanford": "Stanford",
-    "cal": "California",
-    "california": "California",
-    "usc": "USC",
-    "arizona state": "Arizona State",
-    "colorado": "Colorado",
-    "utah state": "Utah State",
-    "new mexico": "New Mexico",
-    "tcu": "TCU",
-    "baylor": "Baylor",
-    "texas a&m": "Texas A&M",
-    "texas tech": "Texas Tech",
-    "oklahoma state": "Oklahoma State",
-    "creighton": "Creighton",
-    "xavier": "Xavier",
-    "dayton": "Dayton",
-    "butler": "Butler",
-    "vcu": "VCU",
-    "richmond": "Richmond",
-    "davidson": "Davidson",
-    "wichita state": "Wichita State",
-    "temple": "Temple",
-    "penn": "Penn",
-    "princeton": "Princeton",
-    "yale": "Yale",
-    "harvard": "Harvard",
-    "columbia": "Columbia",
-    "cornell": "Cornell",
-    "brown": "Brown",
-    "dartmouth": "Dartmouth",
-    "notre dame": "Notre Dame",
-    "boston college": "Boston College",
-    "providence": "Providence",
-    "st. joseph's": "Saint Joseph's",
-    "saint joseph's": "Saint Joseph's",
-    "st josephs": "Saint Joseph's",
-    "miami": "Miami",
-    "miami (fl)": "Miami",
-    "florida state": "Florida State",
-    "fsu": "Florida State",
-    "clemson": "Clemson",
-    "georgia": "Georgia",
-    "west virginia": "West Virginia",
-    "pittsburgh": "Pittsburgh",
-    "pitt": "Pittsburgh",
-    "rutgers": "Rutgers",
-    "virginia tech": "Virginia Tech",
-    "smu": "SMU",
-    "tulane": "Tulane",
-    "tulsa": "Tulsa",
-    "wichita": "Wichita State",
-    "loyola chicago": "Loyola Chicago",
-    "loyola (il)": "Loyola Chicago",
-    "de paul": "DePaul",
-    "st. louis": "Saint Louis",
-    "saint louis": "Saint Louis",
-    "duquesne": "Duquesne",
-    "canisius": "Canisius",
-    "niagara": "Niagara",
-    "iona": "Iona",
-    "manhattan": "Manhattan",
-    "fordham": "Fordham",
-    "st. bonaventure": "St. Bonaventure",
-    "st bonaventure": "St. Bonaventure",
-    "siena": "Siena",
-    "hofstra": "Hofstra",
-    "northeastern": "Northeastern",
-    "boston university": "Boston University",
-    "umass": "UMass",
-    "massachusetts": "UMass",
-    "rhode island": "Rhode Island",
-    "george washington": "George Washington",
-    "american": "American",
-    "navy": "Navy",
-    "army": "Army",
-    "air force": "Air Force",
-    "charlotte": "Charlotte",
-    "unc charlotte": "Charlotte",
-    "old dominion": "Old Dominion",
-    "vcu rams": "VCU",
-    "george mason": "George Mason",
-    "james madison": "James Madison",
-    "richmond spiders": "Richmond",
-    "william & mary": "William & Mary",
-    "william and mary": "William & Mary",
-    "east carolina": "East Carolina",
-    "south florida": "South Florida",
-    "ucf": "UCF",
-    "central florida": "UCF",
-    "fau": "FAU",
-    "florida atlantic": "FAU",
-    "fiu": "FIU",
-    "miami (oh)": "Miami (OH)",
-    "ohio": "Ohio",
-    "akron": "Akron",
-    "kent state": "Kent State",
-    "bowling green": "Bowling Green",
-    "toledo": "Toledo",
-    "western michigan": "Western Michigan",
-    "eastern michigan": "Eastern Michigan",
-    "central michigan": "Central Michigan",
-    "ball state": "Ball State",
-    "northern illinois": "Northern Illinois",
-    "illinois state": "Illinois State",
-    "indiana state": "Indiana State",
-    "southern illinois": "Southern Illinois",
-    "bradley braves": "Bradley",
-    "drake": "Drake",
-    "missouri state": "Missouri State",
-    "evansville": "Evansville",
-    "valparaiso": "Valparaiso",
-    "oakland": "Oakland",
-    "detroit": "Detroit Mercy",
-    "detroit mercy": "Detroit Mercy",
-    "wright state": "Wright State",
-    "cleveland state": "Cleveland State",
-    "youngstown state": "Youngstown State",
-    "green bay": "Green Bay",
-    "milwaukee": "Milwaukee",
-    "uw-milwaukee": "Milwaukee",
-    "uw-green bay": "Green Bay",
-    "northern iowa": "Northern Iowa",
-    "uni": "Northern Iowa",
-    "wichita st": "Wichita State",
-    "new mexico state": "New Mexico State",
-    "nmsu": "New Mexico State",
-    "utep": "UTEP",
-    "utep miners": "UTEP",
-    "utsa": "UTSA",
-    "texas-san antonio": "UTSA",
-    "north texas": "North Texas",
-    "louisiana tech": "Louisiana Tech",
-    "southern miss": "Southern Miss",
-    "middle tennessee": "Middle Tennessee",
-    "western kentucky": "Western Kentucky",
-    "wku": "Western Kentucky",
-    "murray state": "Murray State",
-    "austin peay": "Austin Peay",
-    "belmont": "Belmont",
-    "lipscomb": "Lipscomb",
-    "tennessee state": "Tennessee State",
-    "tennessee tech": "Tennessee Tech",
-    "morehead state": "Morehead State",
-    "eastern kentucky": "Eastern Kentucky",
-    "jacksonville state": "Jacksonville State",
-    "samford": "Samford",
-    "chattanooga": "Chattanooga",
-    "furman": "Furman",
-    "wofford": "Wofford",
-    "unc greensboro": "UNC Greensboro",
-    "east tennessee state": "East Tennessee State",
-    "etsu": "East Tennessee State",
-    "mercer": "Mercer",
-    "the citadel": "The Citadel",
-    "vmi": "VMI",
-    "western carolina": "Western Carolina",
-    "appalachian state": "Appalachian State",
-    "coastal carolina": "Coastal Carolina",
-    "college of charleston": "College of Charleston",
-    "charleston": "College of Charleston",
-    "unc wilmington": "UNC Wilmington",
-    "elon": "Elon",
-    "towson": "Towson",
-    "drexel": "Drexel",
-    "delaware": "Delaware",
-    "hofstra pride": "Hofstra",
-    "william & mary tribe": "William & Mary",
-    "james madison dukes": "James Madison",
-    "northeastern huskies": "Northeastern",
-    "stony brook": "Stony Brook",
-    "albany": "Albany",
-    "vermont": "Vermont",
-    "new hampshire": "New Hampshire",
-    "maine": "Maine",
-    "umbc": "UMBC",
-    "binghamton": "Binghamton",
-    "hartford": "Hartford",
-    "sacred heart": "Sacred Heart",
-    "fairfield": "Fairfield",
-    "iona gaels": "Iona",
-    "manhattan jaspers": "Manhattan",
-    "marist": "Marist",
-    "monmouth": "Monmouth",
-    "niagara purple eagles": "Niagara",
-    "quinnipiac": "Quinnipiac",
-    "rider": "Rider",
-    "saint peter's": "Saint Peter's",
-    "st. peter's": "Saint Peter's",
-    "siena saints": "Siena",
-}
+NBA_TOTALS = RAW / "player-totals.csv"
+NBA_INFO = RAW / "player-career-info.csv"
+BART_DIR = RAW / "barttorvik"
+BART_DIR.mkdir(parents=True, exist_ok=True)
+
+PRO_LEAGUES = {"NBA", "BAA"}
+NBA_TOTALS_URL = (
+    "https://raw.githubusercontent.com/sumitrodatta/bball-reference-datasets/"
+    "master/Data/Player%20Totals.csv"
+)
+NBA_INFO_URL = (
+    "https://raw.githubusercontent.com/sumitrodatta/bball-reference-datasets/"
+    "master/Data/Player%20Career%20Info.csv"
+)
 
 
-def slug(s: str) -> str:
-    s = s.lower().strip()
-    s = s.replace("&", "and")
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    return s.strip("-")
+def norm_name(name: str) -> str:
+    decomposed = unicodedata.normalize("NFD", name or "")
+    return "".join(ch for ch in decomposed.lower() if ch.isalpha())
 
 
-def canon_college(raw: str | None) -> str | None:
-    if not raw:
-        return None
-    key = re.sub(r"\s+", " ", raw.strip().lower())
-    key = key.replace(".", "")
-    return COLLEGE_ALIASES.get(key, raw.strip())
+def school_tokens(text: str) -> set[str]:
+    value = (text or "").lower().replace("st.", "state").replace("&", " and ")
+    value = value.replace("uconn", "connecticut").replace("unc", "north carolina")
+    tokens = set(re.findall(r"[a-z0-9]+", value))
+    tokens.difference_update({"the", "of", "and", "univ", "university", "college", "st"})
+    if "st" in (text or "").lower().split() or "st." in (text or "").lower():
+        tokens.add("state")
+    return tokens
 
 
-def load_json(path: Path):
-    return json.loads(path.read_text())
+def same_college_player(legacy: dict, name: str, schools: list[str]) -> bool:
+    if norm_name(legacy.get("name", "")) != norm_name(name):
+        return False
+    legacy_schools = school_tokens(str(legacy.get("school", "")))
+    modern_schools = school_tokens(" ".join(schools))
+    return bool(legacy_schools & modern_schools)
 
 
-def write_ts(path: Path, export_name: str, payload: object) -> None:
-    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    path.write_text(f"export const {export_name} = {body} as const;\n")
+def num(value: object, default: float = 0.0) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
-def clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
+def parse_height(text: str, fallback: int = 78) -> int:
+    if not text:
+        return fallback
+    if text.isdigit():
+        return int(text)
+    match = re.match(r"(\d+)-(\d+)", text)
+    if match:
+        return int(match.group(1)) * 12 + int(match.group(2))
+    return fallback
 
 
-def build_nba() -> None:
-    raw = load_json(DATA / "nba.json")
-    out = []
-    for p in raw:
-        out.append(
-            {
-                "id": p["id"],
-                "fullName": p["fullName"],
-                "firstName": p.get("firstName"),
-                "lastName": p.get("lastName"),
-                "fromYear": p.get("fromYear"),
-                "toYear": p.get("toYear"),
-                "isActive": bool(p.get("isActive")),
-                "position": p.get("position"),
-                "heightInches": p.get("heightInches"),
-                "weightLbs": p.get("weightLbs"),
-                "draftYear": p.get("draftYear"),
-                "draftRound": p.get("draftRound"),
-                "draftNumber": p.get("draftNumber"),
-                "career": p.get("career") or {},
-                "seasons": p.get("seasons") or [],
-                "awards": p.get("awards") or [],
-                "source": p.get("source") or "nba-stats",
+def map_pos(raw: str, ast: float = 0, reb: float = 0, height: int = 78) -> list[str]:
+    token = (raw or "").upper().replace("-", "/")
+    mapping = {
+        "PG": ["PG"],
+        "SG": ["SG"],
+        "SF": ["SF"],
+        "PF": ["PF"],
+        "C": ["C"],
+        "G": ["SG", "PG"] if ast < 4 else ["PG", "SG"],
+        "F": ["SF", "PF"],
+        "G/F": ["SG", "SF"],
+        "F/G": ["SF", "SG"],
+        "F/C": ["PF", "C"],
+        "C/F": ["C", "PF"],
+    }
+    if token in mapping:
+        return mapping[token]
+    role = (raw or "").lower()
+    if "pure pg" in role or "scoring pg" in role:
+        return ["PG"]
+    if "combo" in role:
+        return ["PG", "SG"]
+    if "wing g" in role or "shoot" in role:
+        return ["SG"]
+    if "stretch" in role:
+        return ["PF", "SF"]
+    if "wing f" in role:
+        return ["SF"]
+    if "pf/c" in role or role.strip() in {"c", "center"}:
+        return ["C", "PF"] if height < 83 else ["C"]
+    if "pf" in role:
+        return ["PF"]
+    if height <= 74 and ast >= 3:
+        return ["PG"]
+    if height <= 77:
+        return ["SG"]
+    if height <= 80:
+        return ["SF"]
+    if height <= 83:
+        return ["PF"]
+    return ["C"]
+
+
+def extract_legacy() -> tuple[dict[str, dict], dict[str, dict]]:
+    """Read hand-built cards for aliases, boosts, and pre-2008 college legends."""
+    nba: dict[str, dict] = {}
+    college: dict[str, dict] = {}
+    card_re = re.compile(
+        r'card\("([^"]+)",\s*"([^"]+)",\s*"(nba|college)",\s*"([^"]+)",\s*\[([^\]]*)\],\s*(\d+),\s*(\d+),\s*line\(([^)]+)\)(?:,\s*\{([^}]*)\})?',
+        re.S,
+    )
+    for path, bucket in ((ROOT / "lib/data/nba.ts", nba), (ROOT / "lib/data/college.ts", college)):
+        text = path.read_text()
+        for match in card_re.finditer(text):
+            player_id, name, league, years, pos_raw, height, weight, line_raw, extra = match.groups()
+            extras = extra or ""
+            boosts_match = re.search(r"boosts:\s*(\{[^}]*\})", extras)
+            boosts = None
+            if boosts_match:
+                try:
+                    boosts = json.loads(re.sub(r"(\w+):", r'"\1":', boosts_match.group(1)))
+                except json.JSONDecodeError:
+                    boosts = None
+            school = re.search(r'school:\s*"([^"]+)"', extras)
+            note = re.search(r'note:\s*"([^"]+)"', extras)
+            parts = [p.strip() for p in line_raw.split(",")]
+            stats = {
+                "games": int(float(parts[0])),
+                "mpg": float(parts[1]),
+                "ppg": float(parts[2]),
+                "rpg": float(parts[3]),
+                "apg": float(parts[4]),
+                "spg": float(parts[5]),
+                "bpg": float(parts[6]),
+                "topg": float(parts[7]),
+                "fgPct": float(parts[8]),
+                "fg3Pct": None if parts[9] == "null" else float(parts[9]),
+                "ftPct": float(parts[10]),
+                "fg3Rate": float(parts[11]),
+                "ftaRate": float(parts[12]),
             }
+            positions = [p.strip().strip('"') for p in pos_raw.split(",") if p.strip()]
+            bucket[norm_name(name)] = {
+                "id": player_id,
+                "name": name,
+                "league": league,
+                "years": years,
+                "heightIn": int(height),
+                "weightLb": int(weight),
+                "positions": positions,
+                "stats": stats,
+                "school": school.group(1) if school else None,
+                "boosts": boosts,
+                "note": note.group(1) if note else None,
+            }
+    return nba, college
+
+
+def build_nba(legacy: dict[str, dict]) -> list[dict]:
+    info: dict[str, dict] = {}
+    with NBA_INFO.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            info[row["player_id"]] = row
+
+    seasons: dict[tuple[str, str], dict] = {}
+    with NBA_TOTALS.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if row["lg"] not in PRO_LEAGUES:
+                continue
+            if num(row["g"]) <= 0:
+                continue
+            key = (row["player_id"], row["season"])
+            existing = seasons.get(key)
+            if row["team"] == "TOT":
+                seasons[key] = row
+            elif existing is None or existing.get("team") != "TOT":
+                seasons[key] = row
+
+    totals: dict[str, dict] = {}
+    pos_votes: dict[str, Counter] = defaultdict(Counter)
+    team_votes: dict[str, Counter] = defaultdict(Counter)
+    for row in seasons.values():
+        pid = row["player_id"]
+        bucket = totals.setdefault(
+            pid,
+            {
+                "g": 0,
+                "mp": 0.0,
+                "pts": 0.0,
+                "trb": 0.0,
+                "ast": 0.0,
+                "stl": 0.0,
+                "blk": 0.0,
+                "tov": 0.0,
+                "fg": 0.0,
+                "fga": 0.0,
+                "x3p": 0.0,
+                "x3pa": 0.0,
+                "ft": 0.0,
+                "fta": 0.0,
+            },
         )
-    LIB_DATA.mkdir(parents=True, exist_ok=True)
-    write_ts(LIB_DATA / "nba.ts", "NBA_PLAYERS", out)
-    print(f"nba.ts  {len(out)} players")
+        for key in bucket:
+            bucket[key] += num(row.get(key if key != "g" else "g"))
+        pos_votes[pid][row.get("pos") or ""] += int(num(row["g"]))
+        if row.get("team") and row["team"] != "TOT":
+            team_votes[pid][row["team"]] += int(num(row["g"]))
 
-
-def build_college() -> None:
-    raw = load_json(DATA / "college.json")
-    # group by (fullName, college)
-    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for r in raw:
-        name = (r.get("fullName") or "").strip()
-        college = canon_college(r.get("college"))
-        if not name or not college:
+    players = []
+    for pid, tot in totals.items():
+        games = tot["g"]
+        if games < 1:
             continue
-        grouped[(name, college)].append(r)
-
-    out = []
-    for (name, college), rows in grouped.items():
-        seasons = []
-        for r in rows:
-            seasons.append(
-                {
-                    "season": r.get("season"),
-                    "school": college,
-                    "g": r.get("g"),
-                    "gs": r.get("gs"),
-                    "mp": r.get("mp"),
-                    "fg": r.get("fg"),
-                    "fga": r.get("fga"),
-                    "fgPct": r.get("fgPct"),
-                    "fg3": r.get("fg3"),
-                    "fg3a": r.get("fg3a"),
-                    "fg3Pct": r.get("fg3Pct"),
-                    "fg2": r.get("fg2"),
-                    "fg2a": r.get("fg2a"),
-                    "fg2Pct": r.get("fg2Pct"),
-                    "efgPct": r.get("efgPct"),
-                    "ft": r.get("ft"),
-                    "fta": r.get("fta"),
-                    "ftPct": r.get("ftPct"),
-                    "orb": r.get("orb"),
-                    "drb": r.get("drb"),
-                    "trb": r.get("trb"),
-                    "ast": r.get("ast"),
-                    "stl": r.get("stl"),
-                    "blk": r.get("blk"),
-                    "tov": r.get("tov"),
-                    "pf": r.get("pf"),
-                    "pts": r.get("pts"),
-                    "sos": r.get("sos"),
-                }
-            )
-        # career rollup (simple weighted-ish: use last season as identity + totals)
-        career_g = sum(s.get("g") or 0 for s in seasons)
-        career_pts = sum((s.get("pts") or 0) * (s.get("g") or 0) for s in seasons)
-        career_trb = sum((s.get("trb") or 0) * (s.get("g") or 0) for s in seasons)
-        career_ast = sum((s.get("ast") or 0) * (s.get("g") or 0) for s in seasons)
-        ppg = (career_pts / career_g) if career_g else None
-        rpg = (career_trb / career_g) if career_g else None
-        apg = (career_ast / career_g) if career_g else None
-        pid = f"cbb:{slug(name)}:{slug(college)}"
-        out.append(
+        bio = info.get(pid, {})
+        name = bio.get("player") or pid
+        mpg = tot["mp"] / games if tot["mp"] else 0
+        fga = tot["fga"]
+        x3pa = tot["x3pa"]
+        stats = {
+            "games": int(games),
+            "mpg": round(mpg, 1),
+            "ppg": round(tot["pts"] / games, 1),
+            "rpg": round(tot["trb"] / games, 1),
+            "apg": round(tot["ast"] / games, 1),
+            "spg": round(tot["stl"] / games, 1),
+            "bpg": round(tot["blk"] / games, 1),
+            "topg": round(tot["tov"] / games, 1),
+            "fgPct": round(tot["fg"] / fga, 3) if fga else 0,
+            "fg3Pct": round(tot["x3p"] / x3pa, 3) if x3pa >= 10 else None,
+            "ftPct": round(tot["ft"] / tot["fta"], 3) if tot["fta"] else 0,
+            "fg3Rate": round(x3pa / fga, 3) if fga else 0,
+            "ftaRate": round(tot["fta"] / fga, 3) if fga else 0,
+        }
+        height = int(num(bio.get("ht_in_in"), 78))
+        weight = int(num(bio.get("wt"), 210))
+        pos_raw = pos_votes[pid].most_common(1)[0][0] if pos_votes[pid] else bio.get("pos", "")
+        positions = map_pos(pos_raw, stats["apg"], stats["rpg"], height)
+        teams = [tm for tm, _ in team_votes[pid].most_common(6)]
+        fr, to = bio.get("from") or "", bio.get("to") or ""
+        years = f"{fr}–{to}" if fr and to else ""
+        prior = legacy.get(norm_name(name))
+        aliases = [prior["id"]] if prior and prior["id"].startswith("nba-") else []
+        players.append(
             {
-                "id": pid,
-                "fullName": name,
-                "college": college,
-                "seasons": seasons,
-                "career": {"g": career_g, "ppg": ppg, "rpg": rpg, "apg": apg},
-                "source": "sports-reference-cbb",
+                "id": f"nba-{pid}",
+                "name": name,
+                "league": "nba",
+                "years": years,
+                "heightIn": height or 78,
+                "weightLb": weight or 210,
+                "positions": positions,
+                "stats": stats,
+                "nbaTeams": " / ".join(teams) if teams else None,
+                "school": bio.get("colleges") or None,
+                "boosts": prior.get("boosts") if prior else None,
+                "note": prior.get("note") if prior else None,
+                "aliases": aliases,
             }
         )
-    write_ts(LIB_DATA / "college.ts", "COLLEGE_PLAYERS", out)
-    print(f"college.ts  {len(out)} players")
+    players.sort(key=lambda p: (-p["stats"]["ppg"], p["name"]))
+    return players
+
+
+def fetch_url(url: str, dest: Path) -> None:
+    if dest.exists() and dest.stat().st_size > 0:
+        return
+    print(f"fetch {url}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url, timeout=120) as response:
+        dest.write_bytes(response.read())
+
+
+def fetch_nba_csvs() -> None:
+    RAW.mkdir(parents=True, exist_ok=True)
+    fetch_url(NBA_TOTALS_URL, NBA_TOTALS)
+    fetch_url(NBA_INFO_URL, NBA_INFO)
+
+
+def fetch_bart(year: int) -> list:
+    path = BART_DIR / f"{year}.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    url = f"https://barttorvik.com/getadvstats.php?year={year}"
+    print(f"fetch {url}")
+    with urllib.request.urlopen(url, timeout=60) as response:
+        data = json.loads(response.read())
+    years = {row[31] for row in data}
+    if year not in years:
+        raise RuntimeError(f"Barttorvik {year} returned {years}")
+    path.write_text(json.dumps(data))
+    time.sleep(0.25)
+    return data
+
+
+def build_college(legacy: dict[str, dict]) -> list[dict]:
+    seasons: dict[str, list] = defaultdict(list)
+    meta: dict[str, dict] = {}
+    for year in range(2008, 2027):
+        for row in fetch_bart(year):
+            if row[31] != year:
+                continue
+            pid = str(row[32])
+            gp = num(row[3])
+            if gp < 1:
+                continue
+            seasons[pid].append(row)
+            meta[pid] = {
+                "name": row[0],
+                "school": row[1],
+                "height": parse_height(str(row[26] or ""), 78),
+                "role": row[64] or "",
+                "year": year,
+            }
+
+    players = []
+    seen_names = set()
+    for pid, rows in seasons.items():
+        games = sum(num(r[3]) for r in rows)
+        if games < 1:
+            continue
+
+        def wavg(index: int) -> float:
+            return sum(num(r[index]) * num(r[3]) for r in rows) / games
+
+        ftm = sum(num(r[13]) for r in rows)
+        fta = sum(num(r[14]) for r in rows)
+        tpm = sum(num(r[16]) for r in rows)
+        tpa = sum(num(r[17]) for r in rows)
+        thm = sum(num(r[19]) for r in rows)
+        tha = sum(num(r[20]) for r in rows)
+        fgm = tpm + thm
+        fga = tpa + tha
+        mpg = wavg(4) / 100 * 40
+        topg = (wavg(12) / 100) * (wavg(6) / 100) * 70 * (wavg(4) / 100)
+        schools = []
+        for row in rows:
+            if row[1] not in schools:
+                schools.append(row[1])
+        years = f"{min(int(r[31]) for r in rows)}–{max(int(r[31]) for r in rows)}"
+        info = meta[pid]
+        height = info["height"]
+        stats = {
+            "games": int(games),
+            "mpg": round(mpg, 1),
+            "ppg": round(wavg(63), 1),
+            "rpg": round(wavg(59), 1),
+            "apg": round(wavg(60), 1),
+            "spg": round(wavg(61), 1),
+            "bpg": round(wavg(62), 1),
+            "topg": round(topg, 1),
+            "fgPct": round(fgm / fga, 3) if fga else 0,
+            "fg3Pct": round(thm / tha, 3) if tha >= 8 else None,
+            "ftPct": round(ftm / fta, 3) if fta else 0,
+            "fg3Rate": round(tha / fga, 3) if fga else 0,
+            "ftaRate": round(fta / fga, 3) if fga else 0,
+        }
+        name = info["name"]
+        legacy_card = legacy.get(norm_name(name))
+        matched = bool(legacy_card and same_college_player(legacy_card, name, schools))
+        aliases = [legacy_card["id"]] if matched and legacy_card["id"].startswith("cbb-") else []
+        players.append(
+            {
+                "id": f"cbb-{pid}",
+                "name": name,
+                "league": "college",
+                "years": years,
+                "heightIn": height,
+                "weightLb": legacy_card["weightLb"] if matched and legacy_card else 210,
+                "positions": map_pos(info["role"], stats["apg"], stats["rpg"], height),
+                "stats": stats,
+                "school": " / ".join(schools[:3]),
+                "boosts": legacy_card.get("boosts") if matched and legacy_card else None,
+                "note": None,
+                "aliases": aliases,
+            }
+        )
+        if matched:
+            seen_names.add(norm_name(name))
+
+    for key, card in legacy.items():
+        if key in seen_names:
+            continue
+        players.append(
+            {
+                **{k: card[k] for k in ("id", "name", "league", "years", "heightIn", "weightLb", "positions", "stats", "school", "boosts", "note")},
+                "aliases": [],
+            }
+        )
+    players.sort(key=lambda p: (-p["stats"]["ppg"], p["name"]))
+    return players
+
+
+def strip_nulls(players: list[dict]) -> list[dict]:
+    cleaned = []
+    for player in players:
+        row = {k: v for k, v in player.items() if v not in (None, [], {})}
+        cleaned.append(row)
+    return cleaned
+
+
+def catalog_present() -> bool:
+    return all((OUT / name).exists() and (OUT / name).stat().st_size > 0 for name in ("nba.json", "college.json", "aliases.json"))
+
+
+def main() -> None:
+    if catalog_present() and os.environ.get("FORCE_CATALOG") != "1":
+        print("catalog already present; set FORCE_CATALOG=1 to rebuild")
+        return
+    fetch_nba_csvs()
+    nba_legacy, college_legacy = extract_legacy()
+    print(f"legacy nba {len(nba_legacy)} college {len(college_legacy)}")
+    nba = strip_nulls(build_nba(nba_legacy))
+    college = strip_nulls(build_college(college_legacy))
+    aliases = {}
+    for player in nba + college:
+        for alias in player.get("aliases", []):
+            aliases[alias] = player["id"]
+        player.pop("aliases", None)
+    (OUT / "nba.json").write_text(json.dumps(nba, separators=(",", ":")))
+    (OUT / "college.json").write_text(json.dumps(college, separators=(",", ":")))
+    (OUT / "aliases.json").write_text(json.dumps(aliases, indent=2))
+    print(f"wrote {len(nba)} nba, {len(college)} college, {len(aliases)} aliases")
+    print("nba bytes", (OUT / "nba.json").stat().st_size)
+    print("college bytes", (OUT / "college.json").stat().st_size)
 
 
 if __name__ == "__main__":
-    build_nba()
-    build_college()
+    main()
