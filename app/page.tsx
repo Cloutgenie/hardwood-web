@@ -40,7 +40,9 @@ export default function Home() {
             </p>
             <p>
               Ratings come from per-36 counting stats and shooting rates, using separate NBA and
-              college baselines. A 27-point college season is not mapped onto NBA scoring.
+              college baselines. Tiny samples regress toward average. High-usage creators are graded
+              on turnovers per creation, not raw TOV. A 27-point college season is not mapped onto
+              NBA scoring.
             </p>
           </CardContent>
         </Card>
