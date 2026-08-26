@@ -88,6 +88,27 @@ export function clampRating(value: number): number {
   return Math.max(20, Math.min(80, Math.round(value)));
 }
 
+/** Tiny samples regress hard; a full season starter is trusted. */
+export function sampleReliability(league: League, games: number, mpg: number): number {
+  const minutes = Math.max(0, games) * Math.max(0, mpg);
+  const full = league === "nba" ? 7000 : 850;
+  const floor = league === "nba" ? 250 : 100;
+  if (minutes <= floor) return 0.18;
+  return Math.min(1, 0.18 + (0.82 * (minutes - floor)) / (full - floor));
+}
+
+function regressRating(value: number, reliability: number, mean = 48): number {
+  return clampRating(mean + (value - mean) * reliability);
+}
+
+/** Approximate FGA/36 from points and shooting rates. */
+function fgaPer36(stats: CareerStats, pts36: number): number {
+  const pointsPerFga =
+    2 * Math.max(stats.fgPct, 0.3) * (1 + 0.5 * stats.fg3Rate) +
+    stats.ftaRate * Math.max(stats.ftPct, 0.5);
+  return pointsPerFga > 0.45 ? pts36 / pointsPerFga : pts36 / 1.1;
+}
+
 export function zToRating(value: number, baseline: Baseline, scale = 10): number {
   const z = (value - baseline.mean) / baseline.sd;
   return clampRating(50 + z * scale);
@@ -172,12 +193,14 @@ export function deriveRatings(source: PlayerSource): Ratings {
     sd: league === "nba" ? 5.6 : 5.2,
   });
 
-  const rimPressure = stats.ftaRate * 40 + (pos === "C" || pos === "PF" ? 8 : 0);
+  const rimPressure = stats.ftaRate * 34 + (pos === "C" || pos === "PF" ? 4 : 3);
+  const volumeFinish = Math.max(0, Math.min(8, (p36.pts - 18) * 0.7));
   ratings.finish = clampRating(
-    zToRating(fg2, { mean: 0.49, sd: 0.055 }) * 0.62 +
-      zToRating(stats.ftaRate, base.ftaRate) * 0.28 +
-      rimPressure * 0.15 +
-      (heightIn - 78) * 0.35,
+    zToRating(fg2, { mean: 0.49, sd: 0.055 }) * 0.42 +
+      zToRating(stats.ftaRate, base.ftaRate) * 0.46 +
+      rimPressure * 0.2 +
+      (heightIn - 78) * 0.12 +
+      volumeFinish,
   );
 
   ratings.midRange = clampRating(
@@ -187,25 +210,42 @@ export function deriveRatings(source: PlayerSource): Ratings {
       (pos === "PG" || pos === "SG" || pos === "SF" ? 3 : 0),
   );
 
+  const threePa36 = fgaPer36(stats, p36.pts) * stats.fg3Rate;
   if (stats.fg3Pct == null || stats.fg3Rate < 0.04) {
-    ratings.three = clampRating(24 + stats.fg3Rate * 40);
+    ratings.three = clampRating(24 + Math.min(threePa36, 4) * 4);
   } else {
-    const volumeBoost = Math.min(12, (stats.fg3Rate - 0.2) * 30);
-    ratings.three = clampRating(
-      zToRating(stats.fg3Pct, base.fg3Pct, 12) + volumeBoost,
-    );
+    const pct = zToRating(stats.fg3Pct, base.fg3Pct, 10);
+    const volume = Math.max(-6, Math.min(8, (threePa36 - 5) * 1.35));
+    let three = pct + volume;
+    if (threePa36 < 2.8) {
+      three = 42 + (three - 42) * (threePa36 / 2.8);
+    }
+    ratings.three = clampRating(three);
   }
 
   ratings.freeThrow = zToRating(stats.ftPct, base.ftPct, 12);
 
   ratings.pass = zToRating(p36.ast, base.per36Ast, 11);
-  const tovPenalty = zToRating(p36.tov, base.per36Tov, 10);
-  ratings.handle = clampRating(105 - tovPenalty + (ratings.pass - 50) * 0.25);
+  const missingTovEra = stats.topg <= 0.05;
+  if (missingTovEra) {
+    ratings.handle = clampRating(50 + (ratings.pass - 50) * 0.28);
+  } else {
+    // Raw TOV/36 punishes high-usage creators. Grade turnovers against creation.
+    const creationLoad = Math.max(8, p36.pts * 0.4 + p36.ast * 1.25);
+    const tovRate = p36.tov / creationLoad;
+    ratings.handle = Math.max(
+      30,
+      clampRating(
+        zToRating(-tovRate, { mean: -0.2, sd: 0.055 }, 10) + (ratings.pass - 50) * 0.18,
+      ),
+    );
+  }
   const astTo = stats.topg > 0.2 ? stats.apg / stats.topg : stats.apg * 2;
   ratings.iq = clampRating(
-    zToRating(astTo, { mean: 1.7, sd: 0.85 }, 10) * 0.55 +
-      ratings.pass * 0.25 +
-      (50 + (mpg - 28)) * 0.2,
+    zToRating(astTo, { mean: 1.7, sd: 0.85 }, 9) * 0.4 +
+      ratings.pass * 0.28 +
+      ratings.handle * 0.14 +
+      (50 + (mpg - 28) * 0.65) * 0.18,
   );
 
   ratings.steal = zToRating(p36.stl, base.per36Stl, 11);
@@ -251,6 +291,28 @@ export function deriveRatings(source: PlayerSource): Ratings {
     44 + Math.min(20, stats.games / 50) + (ratings.iq - 50) * 0.2,
   );
 
+  const reliability = sampleReliability(league, stats.games, mpg);
+  if (reliability < 0.99) {
+    const volatile: RatingKey[] = [
+      "finish",
+      "midRange",
+      "three",
+      "pass",
+      "handle",
+      "iq",
+      "steal",
+      "block",
+      "perimeterD",
+      "interiorD",
+      "orb",
+      "drb",
+      "usage",
+    ];
+    for (const key of volatile) {
+      ratings[key] = regressRating(ratings[key], reliability);
+    }
+  }
+
   if (boosts) {
     for (const key of RATING_KEYS) {
       const boost = boosts[key];
@@ -265,44 +327,60 @@ export function deriveRatings(source: PlayerSource): Ratings {
 }
 
 export function overallFromRatings(ratings: Ratings, pos: Position): number {
-  const shot = Math.max(ratings.finish, ratings.midRange, ratings.three);
-  const create = Math.max(ratings.pass, ratings.usage);
-  const stop = Math.max(ratings.perimeterD, ratings.interiorD, ratings.steal, ratings.block);
+  const blend = ratings.finish * 0.36 + ratings.midRange * 0.28 + ratings.three * 0.36;
+  const peakShot = Math.max(ratings.finish, ratings.midRange, ratings.three);
+  const scoring = peakShot * 0.4 + blend * 0.6;
+  const stop =
+    ratings.perimeterD * 0.32 +
+    ratings.interiorD * 0.32 +
+    ratings.block * 0.18 +
+    ratings.steal * 0.18;
   const glass = ratings.orb * 0.4 + ratings.drb * 0.6;
   const family = pos === "PG" || pos === "SG" ? "G" : pos === "C" ? "C" : "F";
 
   let weighted: number;
   if (family === "G") {
     weighted =
-      shot * 0.26 +
-      create * 0.24 +
-      ratings.usage * 0.12 +
-      stop * 0.16 +
-      ratings.handle * 0.08 +
-      ratings.iq * 0.08 +
-      ratings.speed * 0.06;
+      scoring * 0.26 +
+      ratings.usage * 0.22 +
+      ratings.pass * 0.08 +
+      stop * 0.12 +
+      ratings.handle * 0.07 +
+      ratings.iq * 0.07 +
+      ratings.speed * 0.06 +
+      ratings.stamina * 0.07 +
+      glass * 0.05;
   } else if (family === "C") {
     weighted =
-      ratings.finish * 0.2 +
-      ratings.interiorD * 0.2 +
-      glass * 0.16 +
-      ratings.usage * 0.14 +
+      ratings.usage * 0.2 +
+      ratings.finish * 0.16 +
+      ratings.interiorD * 0.14 +
+      glass * 0.14 +
       ratings.pass * 0.1 +
-      ratings.block * 0.1 +
-      ratings.strength * 0.1;
+      ratings.block * 0.08 +
+      ratings.strength * 0.08 +
+      ratings.iq * 0.06 +
+      scoring * 0.04;
   } else {
     weighted =
-      shot * 0.24 +
-      ratings.usage * 0.16 +
-      stop * 0.18 +
-      glass * 0.12 +
-      create * 0.12 +
-      ratings.iq * 0.1 +
-      ratings.strength * 0.08;
+      scoring * 0.24 +
+      ratings.usage * 0.2 +
+      stop * 0.14 +
+      glass * 0.1 +
+      ratings.pass * 0.08 +
+      ratings.iq * 0.08 +
+      ratings.strength * 0.08 +
+      ratings.stamina * 0.08;
   }
 
-  const excellence = [shot, create, stop, ratings.usage].filter((n) => n >= 70).length;
-  return clampRating(weighted + excellence * 2.2);
+  if (ratings.usage < 62) {
+    const damp = 0.42 + (0.58 * (ratings.usage - 34)) / 28;
+    weighted = 50 + (weighted - 50) * Math.max(0.48, Math.min(1, damp));
+  }
+
+  const create = ratings.pass * 0.4 + ratings.usage * 0.6;
+  const breadth = [scoring, create, ratings.iq].filter((n) => n >= 64).length;
+  return clampRating(50 + (weighted - 50) * 1.72 + breadth * 0.8);
 }
 
 export function hydratePlayer(source: PlayerSource): Player {
