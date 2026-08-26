@@ -421,9 +421,44 @@ def catalog_present() -> bool:
     return all((OUT / name).exists() and (OUT / name).stat().st_size > 0 for name in ("nba.json", "college.json", "aliases.json"))
 
 
+def merge_missing_legacy(
+    college: list[dict],
+    college_legacy: dict[str, dict],
+    known_ids: set[str] | None = None,
+) -> list[dict]:
+    """Keep a cached Barttorvik dump, but add hand-built pre-2008 cards the dump never had."""
+    known = {player["id"] for player in college}
+    if known_ids:
+        known.update(known_ids)
+    added = 0
+    for card in college_legacy.values():
+        if card["id"] in known:
+            continue
+        row = {
+            k: card[k]
+            for k in ("id", "name", "league", "years", "heightIn", "weightLb", "positions", "stats", "school", "boosts", "note")
+            if card.get(k) not in (None, [], {})
+        }
+        college.append(row)
+        known.add(card["id"])
+        added += 1
+    if added:
+        college.sort(key=lambda player: (-player["stats"]["ppg"], player["name"]))
+        print(f"merged {added} missing legacy college cards")
+    return college
+
+
 def main() -> None:
     if catalog_present() and os.environ.get("FORCE_CATALOG") != "1":
-        print("catalog already present; set FORCE_CATALOG=1 to rebuild")
+        print("catalog already present; merging any missing legacy cards")
+        _, college_legacy = extract_legacy()
+        aliases = json.loads((OUT / "aliases.json").read_text())
+        college = merge_missing_legacy(
+            json.loads((OUT / "college.json").read_text()),
+            college_legacy,
+            known_ids=set(aliases),
+        )
+        (OUT / "college.json").write_text(json.dumps(strip_nulls(college)))
         return
     fetch_nba_csvs()
     nba_legacy, college_legacy = extract_legacy()
