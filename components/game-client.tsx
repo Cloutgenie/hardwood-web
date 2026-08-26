@@ -376,3 +376,4 @@ function BoxTable({
     </div>
   );
 }
+
